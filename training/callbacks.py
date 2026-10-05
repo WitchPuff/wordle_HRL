@@ -139,6 +139,15 @@ class WordleMetricsCallback(RLlibCallback):
             reduce="mean",
         )
         metrics_logger.log_value(
+                    "mean_lost_greens",
+                    float(
+                        final_info[
+                            "total_lost_greens"
+                        ]
+                    ),
+                    reduce="mean",
+                )
+        metrics_logger.log_value(
             "mean_final_candidates",
             float(final_info["candidates_after"]),
             reduce="mean",

@@ -148,6 +148,7 @@ class LearningCurveLogger:
         "mean_new_yellows",
         "mean_new_greens",
         "mean_retained_greens",
+        "mean_lost_greens",
         "mean_final_candidates"
     ]
 
@@ -183,6 +184,7 @@ class LearningCurveLogger:
         seed,
         modules,
         results_root="results",
+        exp_name=None
     ):
 
         self.architecture = str(
@@ -227,6 +229,7 @@ class LearningCurveLogger:
                 f"{self.architecture}"
                 f"_{self.prior}"
             )
+            / (exp_name if exp_name is not None else "")
         )
 
         self.results_dir.mkdir(
@@ -391,6 +394,10 @@ class LearningCurveLogger:
             env_metrics,
             "mean_retained_greens",
         )
+        mean_lost_greens = _get_env_metric(
+            env_metrics,
+            "mean_lost_greens",
+        )
         
         mean_final_candidates = _get_env_metric(
             env_metrics,
@@ -435,6 +442,8 @@ class LearningCurveLogger:
 
             "mean_retained_greens":
                 mean_retained_greens,
+            
+            "mean_lost_greens": mean_lost_greens,
                 
             "mean_final_candidates":
                 mean_final_candidates,

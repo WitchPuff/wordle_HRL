@@ -1,298 +1,140 @@
-# training/train_rl.py
-
 import argparse
 import json
 from pathlib import Path
-from training.logging_utils import (
-    LearningCurveLogger,
-)
-
-from training.callbacks import (
-    WordleMetricsCallback,
-)
-from tqdm import tqdm
 
 import ray
 import torch
+from tqdm import tqdm
+from ray.rllib.algorithms.ppo import PPOConfig
+from ray.rllib.core.rl_module.rl_module import RLModuleSpec
+from ray.tune.registry import register_env
 
-from ray.rllib.algorithms.ppo import (
-    PPOConfig,
-)
-
-from ray.rllib.core.rl_module.rl_module import (
-    RLModuleSpec,
-)
-
-from ray.tune.registry import (
-    register_env,
-)
-
-from models.rl import (
-    FlatWordleRLModule,
-)
-
-from training.wordle_env import (
-    WordleEnv,
-)
+from models.rl import FlatWordleRLModule
+from training.callbacks import WordleMetricsCallback
+from training.logging_utils import LearningCurveLogger
+from training.wordle_env import WordleEnv
 
 
 def main():
-
     parser = argparse.ArgumentParser()
 
-    parser.add_argument(
-        "--seed",
-        type=int,
-        required=True,
-    )
+    parser.add_argument("--seed", type=int, required=True)
+    parser.add_argument("--prior", choices=["lm", "random"], required=True)
+    parser.add_argument("--iterations", type=int, default=1000)
+    parser.add_argument("--checkpoint-every", type=int, default=25)
+    parser.add_argument("--debug", action="store_true")
 
-    parser.add_argument(
-        "--prior",
-        choices=[
-            "lm",
-            "random",
-        ],
-        required=True,
-    )
+    # Reward
+    parser.add_argument("--step-penalty", type=float, default=-0.05)
+    parser.add_argument("--yellow-reward", type=float, default=0.03)
+    parser.add_argument("--green-reward", type=float, default=0.15)
+    parser.add_argument("--info-gain-weight", type=float, default=0.005)
+    parser.add_argument("--solve-reward", type=float, default=10.0)
 
-    parser.add_argument(
-        "--iterations",
-        type=int,
-        default=1000,
-    )
-
-    parser.add_argument(
-        "--checkpoint-every",
-        type=int,
-        default=25,
-    )
-    parser.add_argument(
-            "--debug",
-            type=bool,
-            default=False,
-        )
-
+    # PPO
+    parser.add_argument("--lr", type=float, default=1e-4)
+    parser.add_argument("--gamma", type=float, default=0.99)
+    parser.add_argument("--lambda", dest="lambda_", type=float, default=0.95)
+    parser.add_argument("--clip-param", type=float, default=0.2)
+    parser.add_argument("--entropy-coeff", type=float, default=0.01)
+    parser.add_argument("--vf-loss-coeff", type=float, default=0.5)
+    parser.add_argument("--train-batch-size", type=int, default=4096)
+    parser.add_argument("--minibatch-size", type=int, default=256)
+    parser.add_argument("--num-epochs", type=int, default=5)
+    parser.add_argument("--max-guesses", type=int, default=6)
     args = parser.parse_args()
 
-    # ========================================================
-    # GPU
-    # ========================================================
-
     if not torch.cuda.is_available():
-        raise RuntimeError(
-            "CUDA is not available. "
-            "Run inside a GPU allocation."
-        )
+        raise RuntimeError("CUDA is not available. Run inside a GPU allocation.")
+    print("GPU:", torch.cuda.get_device_name(0))
 
-    print(
-        "GPU:",
-        torch.cuda.get_device_name(0),
-    )
-
-    # ========================================================
-    # Data
-    # ========================================================
-
-    with open(
-        "artifacts/splits.json",
-        "r",
-        encoding="utf-8",
-    ) as f:
-
+    with open("artifacts/splits.json", "r", encoding="utf-8") as f:
         splits = json.load(f)
 
-    vocabulary = splits[
-        "vocabulary"
-    ]
+    vocabulary = splits["vocabulary"]
+    train_targets = splits["train_targets"]
 
-    train_targets = splits[
-        "train_targets"
-    ]
-
-    embedding_path = Path(
-        f"artifacts/"
-        f"candidate_embeddings_"
-        f"{args.prior}.pt"
-    ).resolve()
-
-    embeddings = torch.load(
-        embedding_path,
-        map_location="cpu",
-        weights_only=True,
-    )
-
+    embedding_path = Path(f"artifacts/candidate_embeddings_{args.prior}.pt").resolve()
+    embeddings = torch.load(embedding_path, map_location="cpu", weights_only=True)
     word_dim = embeddings.shape[-1]
 
-    # ========================================================
-    # Environment
-    # ========================================================
-
-    register_env(
-        "Wordle-v0",
-        lambda cfg: WordleEnv(cfg),
-    )
-
-    # ========================================================
-    # PPO
-    # ========================================================
+    register_env("Wordle-v0", lambda cfg: WordleEnv(cfg))
 
     config = (
         PPOConfig()
-
         .environment(
             "Wordle-v0",
-
             env_config={
                 "vocabulary": vocabulary,
                 "targets": train_targets,
-                "max_guesses": 6,
-
-                "step_penalty": -0.1,
-                "yellow_reward": 0.03,
-                "green_reward": 0.15,
-                "green_retention_reward": 0.05,
-                "info_gain_weight": 0.01,
-                "solve_reward": 3.0,
-
+                "max_guesses": args.max_guesses,
+                "step_penalty": args.step_penalty,
+                "yellow_reward": args.yellow_reward,
+                "green_reward": args.green_reward,
+                "info_gain_weight": args.info_gain_weight,
+                "solve_reward": args.solve_reward,
                 "debug": args.debug,
             },
         )
-        .callbacks(
-            WordleMetricsCallback
-        )
+        .callbacks(WordleMetricsCallback)
         .rl_module(
-            rl_module_spec=
-                RLModuleSpec(
-
-                    module_class=
-                        FlatWordleRLModule,
-
-                    model_config={
-                        "hidden_dim":
-                            256,
-
-                        "projection_dim":
-                            256,
-
-                        "word_dim":
-                            word_dim,
-
-                        "candidate_embeddings_path":
-                            str(
-                                embedding_path
-                            ),
-                    },
-                )
+            rl_module_spec=RLModuleSpec(
+                module_class=FlatWordleRLModule,
+                model_config={
+                    "hidden_dim": 256,
+                    "projection_dim": 256,
+                    "word_dim": word_dim,
+                    "candidate_embeddings_path": str(embedding_path),
+                },
+            )
         )
-
         .training(
-            lr=3e-4,
-
-            gamma=0.99,
-
-            lambda_=0.95,
-
-            clip_param=0.2,
-
-            entropy_coeff=0.001,
-
-            vf_loss_coeff=0.5,
-
-            train_batch_size_per_learner=
-                4096,
-
-            minibatch_size=
-                256,
-
-            num_epochs=
-                10,
+            lr=args.lr,
+            gamma=args.gamma,
+            lambda_=args.lambda_,
+            clip_param=args.clip_param,
+            entropy_coeff=args.entropy_coeff,
+            vf_loss_coeff=args.vf_loss_coeff,
+            train_batch_size_per_learner=args.train_batch_size,
+            minibatch_size=args.minibatch_size,
+            num_epochs=args.num_epochs,
         )
-
-        .learners(
-            num_learners=1,
-            num_gpus_per_learner=1,
-        )
-
-
+        .learners(num_learners=1, num_gpus_per_learner=1)
         .env_runners(
             num_env_runners=1 if args.debug else 4,
             num_envs_per_env_runner=1 if args.debug else 8,
         )
-
-        .debugging(
-            seed=args.seed,
-        )
+        .debugging(seed=args.seed)
     )
 
-    # Current RLlib new stack separates sampling
-    # EnvRunners from Learners; GPU allocation above
-    # applies to the Learner.
     ray.init()
-
     algo = config.build_algo()
 
-    # ========================================================
-    # Output
-    # ========================================================
+    exp_name = f"{args.lr}_{args.entropy_coeff}_{args.num_epochs}_{args.yellow_reward}_{args.green_reward}_{args.info_gain_weight}_{args.solve_reward}_{args.max_guesses}"
+    output_dir = (Path("checkpoints") / f"flat_{args.prior}" / f"seed_{args.seed}" / f"exp_{exp_name}").resolve()
+    output_dir.mkdir(parents=True, exist_ok=True)
 
-    output_dir = (
-        Path("checkpoints")
-        / f"flat_{args.prior}"
-        / f"seed_{args.seed}"
-    ).resolve()
-
-    output_dir.mkdir(
-        parents=True,
-        exist_ok=True,
-    )
     logger = LearningCurveLogger(
         architecture="flat",
         prior=args.prior,
         seed=args.seed,
-        modules=[
-            "default_policy",
-        ],
+        modules=["default_policy"],
+        exp_name=exp_name,
     )
-    # ========================================================
-    # Train
-    # ========================================================
 
     for iteration in tqdm(range(1, args.iterations + 1)):
-
         result = algo.train()
         row = logger.log(iteration, result)
         logger.print_summary(row)
-        
 
-        if (
-            iteration
-            % args.checkpoint_every
-            == 0
-        ):
+        if iteration % args.checkpoint_every == 0:
+            checkpoint_dir = output_dir / f"iter_{iteration:04d}"
+            algo.save_to_path(str(checkpoint_dir))
+            print("checkpoint:", checkpoint_dir)
 
-            checkpoint_dir = (
-                output_dir
-                / f"iter_{iteration:04d}"
-            )
-
-            algo.save_to_path(
-                str(checkpoint_dir)
-            )
-
-            print(
-                "checkpoint:",
-                checkpoint_dir,
-            )
-            
     logger.plot()
-    algo.save_to_path(
-        str(
-            output_dir / "final"
-        )
-    )
-
+    algo.save_to_path(str(output_dir / "final"))
     algo.stop()
-
     ray.shutdown()
 
 
