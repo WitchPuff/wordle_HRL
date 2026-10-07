@@ -9,7 +9,6 @@ from ray.rllib.core.rl_module.apis.value_function_api import ValueFunctionAPI
 class TaskEncoder(nn.Module):
     def __init__(self, obs_dim: int, hidden_dim: int = 256):
         super().__init__()
-
         self.network = nn.Sequential(
             nn.Linear(obs_dim, hidden_dim),
             nn.ReLU(),
@@ -35,18 +34,12 @@ class CandidateScorer(nn.Module):
               |                    |
             psi(.) ----------------+
 
-    LM embeddings remain frozen.
+    LM/random embeddings remain frozen.
     phi and psi are learned by RL.
     """
 
-    def __init__(
-        self,
-        state_dim: int,
-        word_dim: int,
-        projection_dim: int = 256,
-    ):
+    def __init__(self, state_dim: int, word_dim: int, projection_dim: int = 256):
         super().__init__()
-
         self.state_projection = nn.Linear(state_dim, projection_dim)
         self.word_projection = nn.Linear(word_dim, projection_dim)
         self.scale = projection_dim ** -0.5
@@ -54,23 +47,15 @@ class CandidateScorer(nn.Module):
     def forward(self, state, word_embeddings):
         state_repr = self.state_projection(state)
         word_repr = self.word_projection(word_embeddings)
-
         return (state_repr @ word_repr.T) * self.scale
 
 
 class FlatWordleRLModule(TorchRLModule, ValueFunctionAPI):
     def setup(self):
         super().setup()
-
         cfg = self.model_config
 
-        # Observation is now:
-        # {
-        #     "obs": Box(...),
-        #     "action_mask": Box(...)
-        # }
         obs_dim = self.observation_space["obs"].shape[0]
-
         hidden_dim = cfg.get("hidden_dim", 256)
         projection_dim = cfg.get("projection_dim", 256)
         word_dim = cfg["word_dim"]
@@ -98,36 +83,57 @@ class FlatWordleRLModule(TorchRLModule, ValueFunctionAPI):
         if embeddings.shape[0] != self.action_space.n:
             raise ValueError(
                 "Embedding vocabulary size does not match "
-                f"action space: {embeddings.shape[0]} vs {self.action_space.n}"
+                f"action space: {embeddings.shape[0]} "
+                f"vs {self.action_space.n}"
             )
 
         self.register_buffer("candidate_embeddings", embeddings)
 
+    # ======================================================
+    # State representation
+    # ======================================================
+
     def encode_state(self, obs):
         return self.task_encoder(obs.float())
+
+    # ======================================================
+    # Policy forward
+    # ======================================================
 
     def _forward(self, batch, **kwargs):
         observation = batch[Columns.OBS]
 
         obs = observation["obs"].float()
-        action_mask = observation["action_mask"]
+        candidate_mask = observation["candidate_mask"].float()
+        soft_mask_penalty = observation["soft_mask_penalty"].float()
 
+        # Encode Wordle history.
         h = self.encode_state(obs)
 
+        # Score all vocabulary words.
         logits = self.candidate_scorer(
             h,
             self.candidate_embeddings,
         )
 
-        # Hard action masking.
-        logits = logits.masked_fill(
-            action_mask <= 0,
-            torch.finfo(logits.dtype).min,
-        )
+        # Soft candidate bias.
+        #
+        # Training env:
+        #     soft_mask_penalty = configured lambda
+        #
+        # Evaluation env:
+        #     soft_mask_penalty = 0
+        #
+        # The model weights are identical in both cases.
+        logits = logits - soft_mask_penalty * (1.0 - candidate_mask)
 
         return {
             Columns.ACTION_DIST_INPUTS: logits,
         }
+
+    # ======================================================
+    # Value function
+    # ======================================================
 
     def compute_values(self, batch, embeddings=None):
         if embeddings is None:
@@ -136,9 +142,11 @@ class FlatWordleRLModule(TorchRLModule, ValueFunctionAPI):
 
         return self.value_head(embeddings).squeeze(-1)
 
-    # Used by probing.
+    # ======================================================
+    # Representation for probing
+    # ======================================================
+
     def get_representation(self, obs):
-        # Support both raw observation tensors and Dict observations.
         if isinstance(obs, dict):
             obs = obs["obs"]
 

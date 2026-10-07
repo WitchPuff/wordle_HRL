@@ -4,840 +4,235 @@ import csv
 import math
 from pathlib import Path
 
-import pandas as pd
 import matplotlib.pyplot as plt
-# ============================================================
-# Helpers
-# ============================================================
+import pandas as pd
 
-def _safe_get(
-    dictionary,
-    key,
-    default=math.nan,
-):
-    """
-    Safely retrieve a value from a dictionary.
-    """
 
-    if not isinstance(
-        dictionary,
-        dict,
-    ):
+def _safe_get(d, key, default=math.nan):
+    if not isinstance(d, dict):
+        return default
+    value = d.get(key, default)
+    return default if value is None else value
+
+
+def _get_env_metric(env_metrics, key, default=math.nan):
+    if not isinstance(env_metrics, dict):
         return default
 
-    value = dictionary.get(
-        key,
-        default,
-    )
+    if key in env_metrics and env_metrics[key] is not None:
+        return env_metrics[key]
 
-    if value is None:
-        return default
-
-    return value
-
-
-def _get_env_metric(
-    env_metrics,
-    key,
-    default=math.nan,
-):
-    """
-    Retrieve a custom environment metric.
-
-    First checks:
-
-        env_runners[key]
-
-    Then:
-
-        env_runners["custom_metrics"][key]
-
-    This makes the logger slightly more robust to
-    differences in RLlib metric nesting.
-    """
-
-    if not isinstance(
-        env_metrics,
-        dict,
-    ):
-        return default
-
-    # --------------------------------------------------------
-    # Direct metric
-    # --------------------------------------------------------
-
-    if key in env_metrics:
-
-        value = env_metrics[
-            key
-        ]
-
-        if value is not None:
-            return value
-
-    # --------------------------------------------------------
-    # custom_metrics
-    # --------------------------------------------------------
-
-    custom_metrics = env_metrics.get(
-        "custom_metrics",
-        {},
-    )
-
-    if (
-        isinstance(
-            custom_metrics,
-            dict,
-        )
-        and key in custom_metrics
-    ):
-
-        value = custom_metrics[
-            key
-        ]
-
-        if value is not None:
-            return value
+    custom = env_metrics.get("custom_metrics", {})
+    if isinstance(custom, dict) and key in custom and custom[key] is not None:
+        return custom[key]
 
     return default
 
 
-# ============================================================
-# Learning Curve Logger
-# ============================================================
-
 class LearningCurveLogger:
-    """
-    Shared CSV logger for Flat RL and HRL.
-
-    Flat example:
-
-        logger = LearningCurveLogger(
-            architecture="flat",
-            prior="lm",
-            seed=42,
-            modules=["default_policy"],
-        )
-
-    HRL example:
-
-        logger = LearningCurveLogger(
-            architecture="hrl",
-            prior="lm",
-            seed=42,
-            modules=[
-                "high_level",
-                "low_level",
-            ],
-        )
-
-    One row is written after every PPO iteration.
-    """
-
-    # ========================================================
-    # Environment / task-level metrics
-    # ========================================================
     ENV_FIELDS = [
         "iteration",
         "episode_return",
         "episode_length",
         "solve_rate",
         "mean_guesses_solved",
-
         "mean_info_gain",
         "mean_new_yellows",
         "mean_new_greens",
         "mean_retained_greens",
         "mean_lost_greens",
-        "mean_final_candidates"
+        "mean_final_candidates",
     ]
 
-    # ========================================================
-    # PPO learner metrics
-    # ========================================================
+    VAL_FIELDS = [
+        "val_solve_rate",
+        "val_episode_return",
+        "val_episode_length",
+        "val_mean_guesses_solved",
+    ]
 
     LEARNER_FIELDS = [
-
         "total_loss",
-
         "policy_loss",
-
         "value_loss",
-
         "entropy",
-
         "kl",
-
         "explained_variance",
-
         "learning_rate",
     ]
 
-    # ========================================================
-    # Initialization
-    # ========================================================
+    def __init__(self, architecture, prior, seed, modules, results_root="results", exp_name=None):
+        self.architecture = str(architecture)
+        self.prior = str(prior)
+        self.seed = int(seed)
+        self.modules = list(modules)
 
-    def __init__(
-        self,
-        architecture,
-        prior,
-        seed,
-        modules,
-        results_root="results",
-        exp_name=None
-    ):
+        self.results_dir = Path(results_root) / f"{self.architecture}_{self.prior}"
+        if exp_name is not None:
+            self.results_dir /= exp_name
 
-        self.architecture = str(
-            architecture
-        )
+        self.results_dir.mkdir(parents=True, exist_ok=True)
+        self.csv_path = self.results_dir / f"seed_{self.seed}.csv"
 
-        self.prior = str(
-            prior
-        )
-
-        self.seed = int(
-            seed
-        )
-
-        self.modules = list(
-            modules
-        )
-
-        # ----------------------------------------------------
-        # Output directory
-        #
-        # results/
-        #
-        #   flat_lm/
-        #       seed_42.csv
-        #
-        #   flat_random/
-        #       seed_42.csv
-        #
-        #   hrl_lm/
-        #       seed_42.csv
-        #
-        #   hrl_random/
-        #       seed_42.csv
-        # ----------------------------------------------------
-
-        self.results_dir = (
-            Path(
-                results_root
-            )
-            / (
-                f"{self.architecture}"
-                f"_{self.prior}"
-            )
-            / (exp_name if exp_name is not None else "")
-        )
-
-        self.results_dir.mkdir(
-            parents=True,
-            exist_ok=True,
-        )
-
-        self.csv_path = (
-            self.results_dir
-            / f"seed_{self.seed}.csv"
-        )
-
-        # ----------------------------------------------------
-        # Build CSV columns
-        # ----------------------------------------------------
-
-        self.fieldnames = list(
-            self.ENV_FIELDS
-        )
-
+        self.fieldnames = self.ENV_FIELDS + self.VAL_FIELDS
         for module in self.modules:
+            self.fieldnames += [f"{module}_{metric}" for metric in self.LEARNER_FIELDS]
 
-            for metric in (
-                self.LEARNER_FIELDS
-            ):
+        with open(self.csv_path, "w", newline="") as f:
+            csv.DictWriter(f, fieldnames=self.fieldnames).writeheader()
 
-                self.fieldnames.append(
-                    f"{module}_{metric}"
-                )
+        print(f"\nLearning curve logger initialized:\n{self.csv_path.resolve()}", flush=True)
 
-        # ----------------------------------------------------
-        # Create / overwrite CSV
-        # ----------------------------------------------------
-
-        with open(
-            self.csv_path,
-            "w",
-            newline="",
-        ) as f:
-
-            writer = csv.DictWriter(
-                f,
-                fieldnames=self.fieldnames,
-            )
-
-            writer.writeheader()
-
-        print(
-            "\n"
-            "Learning curve logger initialized:"
-        )
-
-        print(
-            self.csv_path.resolve(),
-            flush=True,
-        )
-
-    # ========================================================
-    # Learner metric extraction
-    # ========================================================
-
-    def _extract_learner_metrics(
-        self,
-        learner,
-    ):
-
+    def _extract_learner_metrics(self, learner):
         return {
-
-            "total_loss":
-                _safe_get(
-                    learner,
-                    "total_loss",
-                ),
-
-            "policy_loss":
-                _safe_get(
-                    learner,
-                    "policy_loss",
-                ),
-
-            "value_loss":
-                _safe_get(
-                    learner,
-                    "vf_loss",
-                ),
-
-            "entropy":
-                _safe_get(
-                    learner,
-                    "entropy",
-                ),
-
-            "kl":
-                _safe_get(
-                    learner,
-                    "mean_kl_loss",
-                ),
-
-            "explained_variance":
-                _safe_get(
-                    learner,
-                    "vf_explained_var",
-                ),
-
-            "learning_rate":
-                _safe_get(
-                    learner,
-                    "default_optimizer_learning_rate",
-                ),
+            "total_loss": _safe_get(learner, "total_loss"),
+            "policy_loss": _safe_get(learner, "policy_loss"),
+            "value_loss": _safe_get(learner, "vf_loss"),
+            "entropy": _safe_get(learner, "entropy"),
+            "kl": _safe_get(learner, "mean_kl_loss"),
+            "explained_variance": _safe_get(learner, "vf_explained_var"),
+            "learning_rate": _safe_get(learner, "default_optimizer_learning_rate"),
         }
 
-    # ========================================================
-    # Log one PPO iteration
-    # ========================================================
-
-    def log(
-        self,
-        iteration,
-        result,
-    ):
-
-        env_metrics = result.get(
-            "env_runners",
-            {},
-        )
-
-        learners = result.get(
-            "learners",
-            {},
-        )
-
-        # ----------------------------------------------------
-        # Callback metrics
-        # ----------------------------------------------------
-
-        solve_rate = _get_env_metric(
-            env_metrics,
-            "solve_rate",
-        )
-
-        mean_guesses_solved = _get_env_metric(
-            env_metrics,
-            "mean_guesses_solved",
-        )
-
-        mean_info_gain = _get_env_metric(
-            env_metrics,
-            "mean_info_gain",
-        )
-
-        mean_new_yellows = _get_env_metric(
-            env_metrics,
-            "mean_new_yellows",
-        )
-
-        mean_new_greens = _get_env_metric(
-            env_metrics,
-            "mean_new_greens",
-        )
-
-        mean_retained_greens = _get_env_metric(
-            env_metrics,
-            "mean_retained_greens",
-        )
-        mean_lost_greens = _get_env_metric(
-            env_metrics,
-            "mean_lost_greens",
-        )
-        
-        mean_final_candidates = _get_env_metric(
-            env_metrics,
-            "mean_final_candidates",
-        )
-
-        # ----------------------------------------------------
-        # Task-level metrics
-        # ----------------------------------------------------
+    def log(self, iteration, result):
+        env = result.get("env_runners", {})
+        val = result.get("evaluation", {}).get("env_runners", {})
+        learners = result.get("learners", {})
 
         row = {
-
-            "iteration":
-                int(iteration),
-
-            "episode_return":
-                _safe_get(
-                    env_metrics,
-                    "episode_return_mean",
-                ),
-
-            "episode_length":
-                _safe_get(
-                    env_metrics,
-                    "episode_len_mean",
-                ),
-
-            "solve_rate":
-                solve_rate,
-
-            "mean_guesses_solved":
-                mean_guesses_solved,
-
-            "mean_info_gain":
-                mean_info_gain,
-
-            "mean_new_yellows":
-                mean_new_yellows,
-
-            "mean_new_greens":
-                mean_new_greens,
-
-            "mean_retained_greens":
-                mean_retained_greens,
-            
-            "mean_lost_greens": mean_lost_greens,
-                
-            "mean_final_candidates":
-                mean_final_candidates,
+            "iteration": int(iteration),
+            "episode_return": _safe_get(env, "episode_return_mean"),
+            "episode_length": _safe_get(env, "episode_len_mean"),
+            "solve_rate": _get_env_metric(env, "solve_rate"),
+            "mean_guesses_solved": _get_env_metric(env, "mean_guesses_solved"),
+            "mean_info_gain": _get_env_metric(env, "mean_info_gain"),
+            "mean_new_yellows": _get_env_metric(env, "mean_new_yellows"),
+            "mean_new_greens": _get_env_metric(env, "mean_new_greens"),
+            "mean_retained_greens": _get_env_metric(env, "mean_retained_greens"),
+            "mean_lost_greens": _get_env_metric(env, "mean_lost_greens"),
+            "mean_final_candidates": _get_env_metric(env, "mean_final_candidates"),
+            "val_solve_rate": _get_env_metric(val, "solve_rate"),
+            "val_episode_return": _safe_get(val, "episode_return_mean"),
+            "val_episode_length": _safe_get(val, "episode_len_mean"),
+            "val_mean_guesses_solved": _get_env_metric(val, "mean_guesses_solved"),
         }
 
-        # ----------------------------------------------------
-        # Learner metrics
-        # ----------------------------------------------------
-
         for module in self.modules:
+            metrics = self._extract_learner_metrics(learners.get(module, {}))
+            for name, value in metrics.items():
+                row[f"{module}_{name}"] = value
 
-            learner = learners.get(
-                module,
-                {},
-            )
-
-            metrics = self._extract_learner_metrics(
-                learner
-            )
-
-            for metric_name, value in metrics.items():
-
-                row[
-                    f"{module}_{metric_name}"
-                ] = value
-
-        with open(
-            self.csv_path,
-            "a",
-            newline="",
-        ) as f:
-
-            writer = csv.DictWriter(
-                f,
-                fieldnames=self.fieldnames,
-            )
-
-            writer.writerow(row)
+        with open(self.csv_path, "a", newline="") as f:
+            csv.DictWriter(f, fieldnames=self.fieldnames).writerow(row)
 
         return row
-        # ========================================================
-        # Pretty-print current iteration
-        # ========================================================
-
-    def print_summary(
-        self,
-        row,
-    ):
+    def print_summary(self, row):
+        print("\n" + "=" * 70)
+        print(f"{self.architecture.upper()} | {self.prior.upper()} | seed={self.seed} | iteration={row['iteration']}")
+        print("-" * 70)
 
         print(
-            "\n"
-            + "=" * 70
+            f"TRAIN | return={row['episode_return']:.3f} | "
+            f"length={row['episode_length']:.2f} | "
+            f"solve={row['solve_rate']:.3f} | "
+            f"guesses={row['mean_guesses_solved']:.2f}"
         )
 
         print(
-            f"{self.architecture.upper()} "
-            f"| "
-            f"{self.prior.upper()} "
-            f"| "
-            f"seed={self.seed} "
-            f"| "
-            f"iteration="
-            f"{row['iteration']}"
+            f"      | info={row['mean_info_gain']:.3f} | "
+            f"yellow={row['mean_new_yellows']:.3f} | "
+            f"green={row['mean_new_greens']:.3f} | "
+            f"retained={row['mean_retained_greens']:.3f} | "
+            f"lost={row['mean_lost_greens']:.3f} | "
+            f"candidates={row['mean_final_candidates']:.3f}"
         )
 
-        print(
-            "-" * 70
-        )
-
-        print(
-            "Task"
-        )
-
-        print(
-            f"  episode return      : "
-            f"{row['episode_return']}"
-        )
-
-        print(
-            f"  episode length      : "
-            f"{row['episode_length']}"
-        )
-
-        print(
-            f"  solve rate          : "
-            f"{row['solve_rate']}"
-        )
-
-        print(
-            f"  mean guesses solved : "
-            f"{row['mean_guesses_solved']}"
-        )
-
-        print(
-            f"  mean info gain      : "
-            f"{row['mean_info_gain']}"
-        )
-
-        print(
-            f"  mean new yellows    : "
-            f"{row['mean_new_yellows']}"
-        )
-
-        print(
-            f"  mean new greens     : "
-            f"{row['mean_new_greens']}"
-        )
-
-        print(
-            f"  mean retained greens: "
-            f"{row['mean_retained_greens']}"
-        )
-        
-        print(
-            f"  mean final candidates: "
-            f"{row['mean_final_candidates']}"
-        )
-
-        # ----------------------------------------------------
-        # Module-specific metrics
-        # ----------------------------------------------------
+        if not math.isnan(row["val_solve_rate"]):
+            print(
+                f"VAL   | return={row['val_episode_return']:.3f} | "
+                f"length={row['val_episode_length']:.2f} | "
+                f"solve={row['val_solve_rate']:.3f} | "
+                f"guesses={row['val_mean_guesses_solved']:.2f}"
+            )
 
         for module in self.modules:
+            print(f"\n{module}")
+            for metric in self.LEARNER_FIELDS:
+                print(f"  {metric:<18}: {row.get(f'{module}_{metric}')}")
 
-            print(
-                "\n"
-                f"{module}"
-            )
+        print("=" * 70, flush=True)
 
-            for metric in (
-                self.LEARNER_FIELDS
-            ):
+    def plot(self, output_dir=None, show=False):
+        df = pd.read_csv(self.csv_path)
 
-                key = (
-                    f"{module}"
-                    f"_{metric}"
-                )
-
-                print(
-                    f"  "
-                    f"{metric:<18}: "
-                    f"{row.get(key)}"
-                )
-
-        print(
-            "=" * 70,
-            flush=True,
-        )
-    # ========================================================
-    # Plot learning curves
-    # ========================================================
-
-    def plot(
-        self,
-        output_dir=None,
-        show=False,
-    ):
-        """
-        Plot learning curves from the CSV file.
-
-        Generates:
-            1. iteration vs solve rate
-            2. iteration vs mean guesses (solved episodes)
-            3. iteration vs mean episode return
-
-        Figures are saved as PNG files.
-        """
-
-        # ----------------------------------------------------
-        # Load CSV
-        # ----------------------------------------------------
-
-        df = pd.read_csv(
-            self.csv_path
-        )
-
-        if len(df) == 0:
-            print(
-                "No data available to plot.",
-                flush=True,
-            )
+        if df.empty:
+            print("No data available to plot.", flush=True)
             return
 
-        # ----------------------------------------------------
-        # Output directory
-        # ----------------------------------------------------
+        output_dir = Path(output_dir) if output_dir else self.results_dir / "plots"
+        output_dir.mkdir(parents=True, exist_ok=True)
 
-        if output_dir is None:
+        title = f"{self.architecture.upper()} + {self.prior.upper()} (seed {self.seed})"
 
-            output_dir = (
-                self.results_dir
-                / "plots"
-            )
+        fig, ax = plt.subplots(figsize=(7, 5))
+        ax.plot(df["iteration"], df["solve_rate"], marker="o", markersize=3, label="Train")
 
-        else:
+        val = df.dropna(subset=["val_solve_rate"])
+        if not val.empty:
+            ax.plot(val["iteration"], val["val_solve_rate"], marker="o", markersize=4, label="Validation")
 
-            output_dir = Path(
-                output_dir
-            )
-
-        output_dir.mkdir(
-            parents=True,
-            exist_ok=True,
-        )
-
-        title_prefix = (
-            f"{self.architecture.upper()} "
-            f"+ {self.prior.upper()} "
-            f"(seed {self.seed})"
-        )
-
-        # ====================================================
-        # 1. Solve rate
-        # ====================================================
-
-        fig, ax = plt.subplots(
-            figsize=(7, 5)
-        )
-
-        ax.plot(
-            df["iteration"],
-            df["solve_rate"],
-            marker="o",
-            markersize=3,
-        )
-
-        ax.set_xlabel(
-            "PPO iteration"
-        )
-
-        ax.set_ylabel(
-            "Solve rate"
-        )
-
-        ax.set_ylim(
-            0.0,
-            1.0,
-        )
-
-        ax.set_title(
-            f"{title_prefix}\n"
-            "Solve rate"
-        )
-
-        ax.grid(
-            alpha=0.3
-        )
-
+        ax.set(xlabel="PPO iteration", ylabel="Solve rate", ylim=(0, 1), title=f"{title}\nSolve rate")
+        ax.grid(alpha=0.3)
+        ax.legend()
         fig.tight_layout()
 
-        solve_path = (
-            output_dir
-            / "solve_rate.png"
-        )
-
-        fig.savefig(
-            solve_path,
-            dpi=200,
-        )
+        solve_path = output_dir / "solve_rate.png"
+        fig.savefig(solve_path, dpi=200)
 
         if show:
             plt.show()
+        plt.close(fig)
 
-        plt.close(
-            fig
-        )
+        fig, ax = plt.subplots(figsize=(7, 5))
+        ax.plot(df["iteration"], df["mean_guesses_solved"], marker="o", markersize=3, label="Train")
 
-        # ====================================================
-        # 2. Mean guesses among solved episodes
-        # ====================================================
+        if not val.empty:
+            ax.plot(val["iteration"], val["val_mean_guesses_solved"], marker="o", markersize=4, label="Validation")
 
-        fig, ax = plt.subplots(
-            figsize=(7, 5)
-        )
-
-        ax.plot(
-            df["iteration"],
-            df["mean_guesses_solved"],
-            marker="o",
-            markersize=3,
-        )
-
-        ax.set_xlabel(
-            "PPO iteration"
-        )
-
-        ax.set_ylabel(
-            "Mean guesses (solved)"
-        )
-
-        ax.set_ylim(
-            1.0,
-            6.0,
-        )
-
-        ax.set_title(
-            f"{title_prefix}\n"
-            "Mean guesses among solved episodes"
-        )
-
-        ax.grid(
-            alpha=0.3
-        )
-
+        ax.set(xlabel="PPO iteration", ylabel="Mean guesses (solved)", ylim=(1, 6), title=f"{title}\nMean guesses")
+        ax.grid(alpha=0.3)
+        ax.legend()
         fig.tight_layout()
 
-        guesses_path = (
-            output_dir
-            / "mean_guesses_solved.png"
-        )
-
-        fig.savefig(
-            guesses_path,
-            dpi=200,
-        )
+        guesses_path = output_dir / "mean_guesses_solved.png"
+        fig.savefig(guesses_path, dpi=200)
 
         if show:
             plt.show()
+        plt.close(fig)
 
-        plt.close(
-            fig
-        )
+        fig, ax = plt.subplots(figsize=(7, 5))
+        ax.plot(df["iteration"], df["episode_return"], marker="o", markersize=3, label="Train")
 
-        # ====================================================
-        # 3. Episode return
-        # ====================================================
+        if not val.empty:
+            ax.plot(val["iteration"], val["val_episode_return"], marker="o", markersize=4, label="Validation")
 
-        fig, ax = plt.subplots(
-            figsize=(7, 5)
-        )
-
-        ax.plot(
-            df["iteration"],
-            df["episode_return"],
-            marker="o",
-            markersize=3,
-        )
-
-        ax.set_xlabel(
-            "PPO iteration"
-        )
-
-        ax.set_ylabel(
-            "Mean episode return"
-        )
-
-        ax.set_title(
-            f"{title_prefix}\n"
-            "Episode return"
-        )
-
-        ax.grid(
-            alpha=0.3
-        )
-
+        ax.set(xlabel="PPO iteration", ylabel="Mean episode return", title=f"{title}\nEpisode return")
+        ax.grid(alpha=0.3)
+        ax.legend()
         fig.tight_layout()
 
-        reward_path = (
-            output_dir
-            / "episode_return.png"
-        )
-
-        fig.savefig(
-            reward_path,
-            dpi=200,
-        )
+        reward_path = output_dir / "episode_return.png"
+        fig.savefig(reward_path, dpi=200)
 
         if show:
             plt.show()
-
-        plt.close(
-            fig
-        )
-
-        # ----------------------------------------------------
-        # Summary
-        # ----------------------------------------------------
+        plt.close(fig)
 
         print(
-            "\nLearning curves saved:",
-            flush=True,
-        )
-
-        print(
-            f"  {solve_path.resolve()}",
-            flush=True,
-        )
-
-        print(
-            f"  {guesses_path.resolve()}",
-            flush=True,
-        )
-
-        print(
+            f"\nLearning curves saved:\n"
+            f"  {solve_path.resolve()}\n"
+            f"  {guesses_path.resolve()}\n"
             f"  {reward_path.resolve()}",
             flush=True,
         )

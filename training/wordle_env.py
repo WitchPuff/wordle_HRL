@@ -11,64 +11,45 @@ class WordleEnv(gym.Env):
     def __init__(self, config):
         super().__init__()
 
-        # ==================================================
-        # Configuration
-        # ==================================================
-
         self.vocabulary = list(config["vocabulary"])
         self.targets = list(config["targets"])
+        self.candidate_targets = list(config.get("candidate_targets", self.targets))
         self.word_to_idx = {word: i for i, word in enumerate(self.vocabulary)}
 
         self.max_guesses = config.get("max_guesses", MAX_GUESSES)
         self.debug = config.get("debug", False)
-
-        # ==================================================
-        # Reward
-        # ==================================================
 
         self.step_penalty = config.get("step_penalty", -0.05)
         self.yellow_reward = config.get("yellow_reward", 0.03)
         self.green_reward = config.get("green_reward", 0.15)
         self.info_gain_weight = config.get("info_gain_weight", 0.005)
         self.solve_reward = config.get("solve_reward", 10.0)
-
-        # ==================================================
-        # Gym spaces
-        # ==================================================
+        self.soft_mask_penalty = float(config.get("soft_mask_penalty", 0.0))
 
         self.action_space = spaces.Discrete(len(self.vocabulary))
-
         self.observation_space = spaces.Dict({
-            "obs": spaces.Box(
-                low=0.0,
-                high=1.0,
-                shape=(OBS_DIM,),
+            "obs": spaces.Box(0.0, 1.0, shape=(OBS_DIM,), dtype=np.float32),
+            "candidate_mask": spaces.Box(
+                0.0,
+                1.0,
+                shape=(len(self.vocabulary),),
                 dtype=np.float32,
             ),
-            "action_mask": spaces.Box(
-                low=0.0,
-                high=1.0,
-                shape=(len(self.vocabulary),),
+            "soft_mask_penalty": spaces.Box(
+                0.0,
+                np.inf,
+                shape=(1,),
                 dtype=np.float32,
             ),
         })
 
-        # ==================================================
-        # Episode state
-        # ==================================================
-
         self.target = None
         self.guesses = []
         self.feedbacks = []
-
         self.known_letters = set()
         self.known_positions = {}
         self.candidates = []
 
-        # ==================================================
-        # Diagnostics
-        # ==================================================
-
         self.reward_history = []
         self.candidate_history = []
         self.info_gain_history = []
@@ -76,24 +57,20 @@ class WordleEnv(gym.Env):
         self.green_history = []
         self.green_retention_history = []
         self.green_loss_history = []
-
-    # ======================================================
-    # Reset
-    # ======================================================
 
     def reset(self, *, seed=None, options=None):
         super().reset(seed=seed)
 
-        self.target = self.targets[self.np_random.integers(len(self.targets))]
+        if options and "target" in options:
+            self.target = options["target"]
+        else:
+            self.target = self.targets[self.np_random.integers(len(self.targets))]
 
         self.guesses = []
         self.feedbacks = []
-
         self.known_letters = set()
         self.known_positions = {}
-
-        # Initially every training target is possible.
-        self.candidates = list(self.targets)
+        self.candidates = list(self.candidate_targets)
 
         self.reward_history = []
         self.candidate_history = []
@@ -103,44 +80,21 @@ class WordleEnv(gym.Env):
         self.green_retention_history = []
         self.green_loss_history = []
 
-        observation = self._get_observation()
-
-        info = {
+        return self._get_observation(), {
             "target": self.target,
             "num_candidates": len(self.candidates),
         }
 
-        return observation, info
-
-    # ======================================================
-    # Step
-    # ======================================================
-
     def step(self, action):
-        action = int(action)
-        guess = self.vocabulary[action]
-
-        # --------------------------------------------------
-        # Previously known greens
-        # --------------------------------------------------
+        guess = self.vocabulary[int(action)]
 
         retained_green = sum(
-            1
+            guess[pos] == letter
             for pos, letter in self.known_positions.items()
-            if guess[pos] == letter
         )
-
         lost_green = len(self.known_positions) - retained_green
 
-        # --------------------------------------------------
-        # Feedback
-        # --------------------------------------------------
-
         feedback = compute_feedback(guess, self.target)
-
-        # --------------------------------------------------
-        # Candidate filtering / information gain
-        # --------------------------------------------------
 
         num_candidates_before = len(self.candidates)
         self.candidates = self._filter_candidates(guess, feedback)
@@ -150,10 +104,6 @@ class WordleEnv(gym.Env):
             np.log(max(num_candidates_before, 1))
             - np.log(max(num_candidates_after, 1))
         )
-
-        # --------------------------------------------------
-        # New information
-        # --------------------------------------------------
 
         new_yellow = 0
         new_green = 0
@@ -174,16 +124,8 @@ class WordleEnv(gym.Env):
 
                 self.known_positions[pos] = letter
 
-        # --------------------------------------------------
-        # Save history
-        # --------------------------------------------------
-
         self.guesses.append(guess)
         self.feedbacks.append(feedback)
-
-        # --------------------------------------------------
-        # Episode state
-        # --------------------------------------------------
 
         solved = guess == self.target
         exhausted = len(self.guesses) >= self.max_guesses
@@ -191,11 +133,7 @@ class WordleEnv(gym.Env):
         terminated = solved
         truncated = exhausted and not solved
 
-        # --------------------------------------------------
-        # Reward
-        # --------------------------------------------------
-
-        reward = (
+        reward = float(
             self.step_penalty
             + self.yellow_reward * new_yellow
             + self.green_reward * new_green
@@ -203,23 +141,15 @@ class WordleEnv(gym.Env):
             + self.solve_reward * int(solved)
         )
 
-        reward = float(reward)
-
-        # --------------------------------------------------
-        # Diagnostics
-        # --------------------------------------------------
-
         self.reward_history.append(reward)
-        self.candidate_history.append((num_candidates_before, num_candidates_after))
+        self.candidate_history.append(
+            (num_candidates_before, num_candidates_after)
+        )
         self.info_gain_history.append(float(info_gain))
         self.yellow_history.append(new_yellow)
         self.green_history.append(new_green)
         self.green_retention_history.append(retained_green)
         self.green_loss_history.append(lost_green)
-
-        # --------------------------------------------------
-        # Next observation
-        # --------------------------------------------------
 
         observation = self._get_observation()
 
@@ -239,17 +169,13 @@ class WordleEnv(gym.Env):
             "reward": reward,
             "candidates_before": num_candidates_before,
             "candidates_after": num_candidates_after,
-            "num_valid_actions": int(self._get_action_mask().sum()),
+            "num_candidates": len(self.candidates),
         }
 
         if self.debug and (terminated or truncated):
             self._print_episode()
 
         return observation, reward, terminated, truncated, info
-
-    # ======================================================
-    # Observation
-    # ======================================================
 
     def _get_observation(self):
         obs = np.asarray(
@@ -263,47 +189,38 @@ class WordleEnv(gym.Env):
 
         return {
             "obs": obs,
-            "action_mask": self._get_action_mask(),
+            "candidate_mask": self._get_candidate_mask(),
+            "soft_mask_penalty": np.asarray(
+                [self.soft_mask_penalty],
+                dtype=np.float32,
+            ),
         }
 
-    # ======================================================
-    # Action mask
-    # ======================================================
-
-    def _get_action_mask(self):
-        mask = np.zeros(len(self.vocabulary), dtype=np.float32)
+    def _get_candidate_mask(self):
+        mask = np.zeros(
+            len(self.vocabulary),
+            dtype=np.float32,
+        )
 
         for word in self.candidates:
             idx = self.word_to_idx.get(word)
+
             if idx is not None:
                 mask[idx] = 1.0
 
-        # Safety fallback: never return an all-zero mask.
-        if not mask.any():
-            mask[:] = 1.0
-
         return mask
 
-    # ======================================================
-    # Candidate filtering
-    # ======================================================
-
     def _filter_candidates(self, guess, feedback):
-        observed_feedback = tuple(int(x) for x in feedback)
-        new_candidates = []
+        observed = tuple(int(x) for x in feedback)
 
-        for candidate in self.candidates:
-            candidate_feedback = compute_feedback(guess, candidate)
-            candidate_feedback = tuple(int(x) for x in candidate_feedback)
-
-            if candidate_feedback == observed_feedback:
-                new_candidates.append(candidate)
-
-        return new_candidates
-
-    # ======================================================
-    # Debug
-    # ======================================================
+        return [
+            candidate
+            for candidate in self.candidates
+            if tuple(
+                int(x)
+                for x in compute_feedback(guess, candidate)
+            ) == observed
+        ]
 
     def _print_episode(self):
         symbols = {
@@ -316,18 +233,16 @@ class WordleEnv(gym.Env):
         print(f"TARGET: {self.target.upper()}")
         print("-" * 95)
 
-        total_reward = 0.0
-
         for i, (
             guess,
             feedback,
             reward,
-            candidate_counts,
+            counts,
             info_gain,
-            new_yellow,
-            new_green,
-            retained_green,
-            lost_green,
+            yellow,
+            green,
+            retained,
+            lost,
         ) in enumerate(
             zip(
                 self.guesses,
@@ -340,34 +255,40 @@ class WordleEnv(gym.Env):
                 self.green_retention_history,
                 self.green_loss_history,
             ),
-            start=1,
+            1,
         ):
-            feedback_str = "".join(symbols[int(x)] for x in feedback)
-            before, after = candidate_counts
-            total_reward += reward
+            feedback_str = "".join(
+                symbols[int(x)]
+                for x in feedback
+            )
+
+            before, after = counts
 
             print(
-                f"{i:>2}. "
-                f"{guess.upper():<7} "
-                f"{feedback_str}  "
+                f"{i:>2}. {guess.upper():<7} {feedback_str}  "
                 f"C: {before:>4} -> {after:<4}  "
-                f"Y+={new_yellow}  "
-                f"G+={new_green}  "
-                f"GR={retained_green}  "
-                f"G-={lost_green}  "
+                f"Y+={yellow}  G+={green}  "
+                f"GR={retained}  G-={lost}  "
                 f"IG={info_gain:>6.3f}  "
                 f"r={reward:+.3f}"
             )
 
+        solved = bool(
+            self.guesses
+            and self.guesses[-1] == self.target
+        )
+
         print("-" * 95)
-
-        solved = bool(self.guesses and self.guesses[-1] == self.target)
-
-        if solved:
-            print(f"SOLVED in {len(self.guesses)} guesses")
-        else:
-            print(f"FAILED after {len(self.guesses)} guesses")
-
-        print(f"Episode return: {total_reward:+.3f}")
-        print(f"Remaining candidates: {len(self.candidates)}")
+        print(
+            f"{'SOLVED' if solved else 'FAILED'} "
+            f"after {len(self.guesses)} guesses"
+        )
+        print(
+            f"Episode return: "
+            f"{sum(self.reward_history):+.3f}"
+        )
+        print(
+            f"Remaining candidates: "
+            f"{len(self.candidates)}"
+        )
         print("=" * 95, flush=True)

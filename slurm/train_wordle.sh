@@ -15,22 +15,35 @@ set -euo pipefail
 # Arguments
 #
 # Usage:
-#
 #   sbatch slurm/train_wordle.sh flat lm 42
-#   sbatch slurm/train_wordle.sh hrl  lm 42
-#
+#   sbatch slurm/train_wordle.sh hrl lm 42
+#   sbatch slurm/train_wordle.sh flat random 42
+#   sbatch slurm/train_wordle.sh hrl random 42
 # ============================================================
 
-ARCHITECTURE=${1:-flat}
+ARCHITECTURE=${1:-hrl}
 PRIOR=${2:-lm}
-SEED=${3:-42}
+SOFT_MASK_PENALTY=${3:-6.0}
 
 ITERATIONS=${4:-100}
 CHECKPOINT_EVERY=${5:-5}
+EVAL_EVERY=${6:-1}
+
+LR=${7:-1e-4}
+ENTROPY_COEFF=${8:-0.01}
+EPOCHS=${9:-5}
+
+STEP_PENALTY=${10:--0.1}
+YELLOW_REWARD=${11:-0.0}
+GREEN_REWARD=${12:-0.0}
+INFO_GAIN_WEIGHT=${13:-0.0}
+SOLVE_REWARD=${14:-10.0}
+MAX_GUESSES=${15:-6}
+SEED=${16:-42}
 
 
 # ============================================================
-# Validate arguments
+# Validate
 # ============================================================
 
 if [[ "$ARCHITECTURE" != "flat" && "$ARCHITECTURE" != "hrl" ]]; then
@@ -53,9 +66,7 @@ conda activate navel
 
 cd ~/wordle
 
-mkdir -p logs
-mkdir -p results
-mkdir -p checkpoints
+mkdir -p logs results checkpoints
 
 
 # ============================================================
@@ -72,6 +83,12 @@ echo "Prior        : ${PRIOR}"
 echo "Seed         : ${SEED}"
 echo "Iterations   : ${ITERATIONS}"
 echo "Checkpoint   : every ${CHECKPOINT_EVERY} iterations"
+echo "Evaluation   : every ${EVAL_EVERY} iterations"
+echo "LR           : ${LR}"
+echo "Entropy      : ${ENTROPY_COEFF}"
+echo "Epochs       : ${EPOCHS}"
+echo "Max guesses  : ${MAX_GUESSES}"
+echo "Soft penalty : ${SOFT_MASK_PENALTY}"
 echo "Start        : $(date)"
 echo "============================================================"
 
@@ -85,24 +102,23 @@ echo
 # Training
 # ============================================================
 
-if [[ "$ARCHITECTURE" == "flat" ]]; then
-
-    python -u -m training.train_rl \
-        --seed "$SEED" \
-        --prior "$PRIOR" \
-        --iterations "$ITERATIONS" \
-        --checkpoint-every "$CHECKPOINT_EVERY"
-
-elif [[ "$ARCHITECTURE" == "hrl" ]]; then
-
-    python -u -m training.train_hrl \
-        --seed "$SEED" \
-        --prior "$PRIOR" \
-        --num-options 3 \
-        --iterations "$ITERATIONS" \
-        --checkpoint-every "$CHECKPOINT_EVERY"
-
-fi
+python -u -m training.train \
+    --architecture "$ARCHITECTURE" \
+    --prior "$PRIOR" \
+    --seed "$SEED" \
+    --iterations "$ITERATIONS" \
+    --checkpoint-every "$CHECKPOINT_EVERY" \
+    --eval-every "$EVAL_EVERY" \
+    --lr "$LR" \
+    --entropy-coeff "$ENTROPY_COEFF" \
+    --num-epochs "$EPOCHS" \
+    --step-penalty "$STEP_PENALTY" \
+    --yellow-reward "$YELLOW_REWARD" \
+    --green-reward "$GREEN_REWARD" \
+    --info-gain-weight "$INFO_GAIN_WEIGHT" \
+    --solve-reward "$SOLVE_REWARD" \
+    --max-guesses "$MAX_GUESSES" \
+    --soft-mask-penalty "$SOFT_MASK_PENALTY"
 
 
 # ============================================================
