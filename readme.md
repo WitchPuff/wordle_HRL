@@ -1,4 +1,4 @@
-# Wordle RL and Hierarchical Representation Learning
+# Learning to Play Wordle: Hierarchical Reinforcement Learning with Linguistic Priors
 
 This repository compares Flat RL and hierarchical RL (HRL) agents for Wordle under two word-representation conditions: pretrained language-model (LM) embeddings and random embeddings.
 
